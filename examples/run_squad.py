@@ -78,7 +78,7 @@ def set_seed(args):
 def to_list(tensor):
     return tensor.detach().cpu().tolist()
 
-def train(args, train_dataset, model, tokenizer):
+def train(args, train_dataset, model, tokenizer, train_logging_steps=100):
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
@@ -131,11 +131,11 @@ def train(args, train_dataset, model, tokenizer):
     global_step = 0
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
-    train_iterator = trange(int(args.num_train_epochs), desc="Epoch", disable=args.local_rank not in [-1, 0])
     set_seed(args)  # Added here for reproductibility (even between python 2 and 3)
-    for _ in train_iterator:
-        epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0])
-        for step, batch in enumerate(epoch_iterator):
+    for epoch in range(int(args.num_train_epochs)):
+        avg_train_loss = []
+        avg_val_loss = []
+        for step, batch in enumerate(train_dataloader):
             model.train()
             batch = tuple(t.to(args.device) for t in batch)
             inputs = {'input_ids':       batch[0],
@@ -162,6 +162,10 @@ def train(args, train_dataset, model, tokenizer):
                 loss.backward()
 
             tr_loss += loss.item()
+            avg_train_loss.append(loss.item())
+            if (global_step) % train_logging_steps == 0 and global_step > 0:
+                logger.info("Average training loss at step {}:{}".format(global_step, np.mean(avg_train_loss)))
+                avg_train_loss = []
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -173,7 +177,7 @@ def train(args, train_dataset, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
 
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
+                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0 and global_step > 0:
                     # Log metrics
                     if args.local_rank == -1 and args.evaluate_during_training:  # Only evaluate when single GPU otherwise metrics may not average well
                         results = evaluate(args, model, tokenizer)
@@ -194,10 +198,8 @@ def train(args, train_dataset, model, tokenizer):
                     logger.info("Saving model checkpoint to %s", output_dir)
 
             if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
                 break
         if args.max_steps > 0 and global_step > args.max_steps:
-            train_iterator.close()
             break
 
     if args.local_rank in [-1, 0]:
@@ -227,7 +229,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     logger.info("  Batch size = %d", args.eval_batch_size)
     all_results = []
     start_time = timeit.default_timer()
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    for batch in eval_dataloader:
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
         with torch.no_grad():
@@ -288,6 +290,7 @@ def evaluate(args, model, tokenizer, prefix=""):
                                  pred_file=output_prediction_file,
                                  na_prob_file=output_null_log_odds_file)
     results = evaluate_on_squad(evaluate_options)
+    logger.info("Evaluation results {}".format(results))
     return results
 
 
